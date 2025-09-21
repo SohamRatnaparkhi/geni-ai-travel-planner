@@ -3,6 +3,9 @@ from routes import health, travel, user, destination
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 load_dotenv()
+from fastapi.staticfiles import StaticFiles
+import os
+from utils.files import static_dir, ensure_dir
 
 app = FastAPI(
     title="Travel Planner API",
@@ -24,6 +27,10 @@ app.include_router(health.router)
 app.include_router(travel.router)
 app.include_router(user.router)
 app.include_router(destination.router)
+
+# Mount static directory for generated images
+ensure_dir(static_dir())
+app.mount("/static", StaticFiles(directory=static_dir()), name="static")
 
 if __name__ == "__main__":
     import uvicorn

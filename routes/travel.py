@@ -1,6 +1,24 @@
 from fastapi import APIRouter, HTTPException
-from typing import List, Dict, Any
+from typing import List, Any
 from pydantic import BaseModel
+import os
+import asyncio
+from google.genai import types as genai_types
+from services.gemini_service import async_gemini_generate_content, async_generate_image_files
+from services.perplexity_service import PerplexityService
+from models.schemas import (
+    ItineraryRequest,
+    ItineraryResponse,
+    TravelOptionsRequest,
+    TravelOptionsResponse,
+)
+from prompts.system_itinerary import SYSTEM_PROMPT_ITINERARY
+from prompts.system_itinerary_places import SYSTEM_PROMPT_ITINERARY_PLACES
+from prompts.system_food_options import SYSTEM_PROMPT_FOOD_OPTIONS
+from prompts.system_travel_options import SYSTEM_PROMPT_TRAVEL_OPTIONS
+from utils.files import static_dir, ensure_dir
+from models.schemas import ItineraryPlacesRequest, ItineraryPlacesResponse
+from config import MODELS, GEMINI_SETTINGS, PERPLEXITY_SETTINGS, IMAGE_GENERATION
 
 router = APIRouter(
     prefix="/travel",
@@ -39,7 +57,11 @@ async def get_travel_info():
         "message": "Travel planning API",
         "endpoints": {
             "plans": "/travel/plans",
-            "destinations": "/travel/destinations"
+            "destinations": "/travel/destinations",
+            "itinerary": "/travel/itinerary",
+            "itinerary_places": "/travel/itinerary/places",
+            "options": "/travel/options",
+            "food": "/travel/food"
         }
     }
 
@@ -90,3 +112,413 @@ async def add_destination(destination: Destination):
         "message": "Destination added successfully",
         "destination": destination.dict()
     }
+
+
+@router.post("/itinerary", response_model=ItineraryResponse)
+async def generate_itinerary(payload: ItineraryRequest) -> Any:
+    try: 
+        system_prompt = SYSTEM_PROMPT_ITINERARY
+
+        user_prompt = (
+            f"Home: {payload.home_city}\n"
+            f"Destination: {payload.destination_city}\n"
+            f"Days: {payload.num_days}\n"
+            f"Interests: {', '.join(payload.interests) if payload.interests else 'general'}\n"
+            "Generate an end-to-end itinerary as per schema."
+        )
+
+        contents = [
+            genai_types.Content(
+                role="user",
+                parts=[genai_types.Part.from_text(text=user_prompt)],
+            )
+        ]
+
+        # Structured schema for itinerary
+        response_schema = genai_types.Schema(
+            type=genai_types.Type.OBJECT,
+            required=["home_city", "destination_city", "num_days", "days"],
+            properties={
+                "home_city": genai_types.Schema(type=genai_types.Type.STRING),
+                "destination_city": genai_types.Schema(type=genai_types.Type.STRING),
+                "num_days": genai_types.Schema(type=genai_types.Type.INTEGER),
+                "days": genai_types.Schema(
+                    type=genai_types.Type.ARRAY,
+                    items=genai_types.Schema(
+                        type=genai_types.Type.OBJECT,
+                        required=["day", "summary", "entities"],
+                        properties={
+                            "day": genai_types.Schema(type=genai_types.Type.INTEGER),
+                            "summary": genai_types.Schema(type=genai_types.Type.STRING),
+                            "route_info": genai_types.Schema(type=genai_types.Type.STRING),
+                            "entities": genai_types.Schema(
+                                type=genai_types.Type.ARRAY,
+                                items=genai_types.Schema(
+                                    type=genai_types.Type.OBJECT,
+                                    required=[
+                                        "name",
+                                        "speciality",
+                                        "places_to_visit",
+                                        "photo_prompts",
+                                    ],
+                                    properties={
+                                        "name": genai_types.Schema(type=genai_types.Type.STRING),
+                                        "speciality": genai_types.Schema(type=genai_types.Type.STRING),
+                                        "places_to_visit": genai_types.Schema(
+                                            type=genai_types.Type.ARRAY,
+                                            items=genai_types.Schema(
+                                                type=genai_types.Type.OBJECT,
+                                                required=["name", "description"],
+                                                properties={
+                                                    "name": genai_types.Schema(type=genai_types.Type.STRING),
+                                                    "description": genai_types.Schema(type=genai_types.Type.STRING),
+                                                },
+                                            ),
+                                        ),
+                                        "photo_prompts": genai_types.Schema(
+                                            type=genai_types.Type.ARRAY,
+                                            items=genai_types.Schema(type=genai_types.Type.STRING),
+                                        ),
+                                    },
+                                ),
+                            ),
+                        },
+                    ),
+                ),
+                "overall_tips": genai_types.Schema(
+                    type=genai_types.Type.ARRAY,
+                    items=genai_types.Schema(type=genai_types.Type.STRING),
+                ),
+            },
+        )
+
+        default_response = {
+            "home_city": payload.home_city,
+            "destination_city": payload.destination_city,
+            "num_days": payload.num_days,
+            "days": [],
+            "overall_tips": [],
+        }
+
+        data = await async_gemini_generate_content(
+            model=MODELS["gemini"]["text"],
+            contents=contents,
+            system_prompt=system_prompt,
+            response_schema=response_schema,
+            temperature=GEMINI_SETTINGS["temperature"]["text"],
+            top_p=GEMINI_SETTINGS["top_p"]["text"],
+            max_output_tokens=GEMINI_SETTINGS["max_output_tokens"]["text"],
+            timeout=GEMINI_SETTINGS["timeout"]["text"],
+            default_response=default_response,
+        )
+
+        # Generate images for each entity using photo_prompts
+        image_base_url = "/static"
+        dest_slug = payload.destination_city.lower().replace(" ", "-")
+        output_dir = os.path.join(static_dir(), f"itineraries/{dest_slug}")
+        ensure_dir(output_dir)
+
+        # Collect all image generation tasks for parallel processing
+        image_tasks = []
+
+        for day in data.get("days", []):
+            for entity in day.get("entities", []):
+                prompts = entity.get("photo_prompts", [])[:IMAGE_GENERATION["max_images_per_entity"]]
+                if prompts:
+                    base_file_name = entity.get("name", "entity").lower().replace(" ", "-")
+                    task = async_generate_image_files(
+                        prompts=prompts,
+                        output_dir=output_dir,
+                        base_file_name=base_file_name,
+                    )
+                    image_tasks.append((entity, task))
+
+        # Process all image generations in parallel
+        if image_tasks:
+            results = await asyncio.gather(*[task for _, task in image_tasks], return_exceptions=True)
+
+            # Handle results and assign to entities
+            for i, (entity, _) in enumerate(image_tasks):
+                result = results[i]
+                if isinstance(result, Exception):
+                    print(f"Image generation failed for {entity.get('name', 'entity')}: {result}")
+                    entity["image_urls"] = []
+                else:
+                    files = result
+                    # Convert to served URLs
+                    entity["image_urls"] = [
+                        f"{image_base_url}/{os.path.relpath(fp, static_dir())}" for fp in files
+                    ]
+        else:
+            # Set empty image_urls for entities without prompts
+            for day in data.get("days", []):
+                for entity in day.get("entities", []):
+                    entity["image_urls"] = []
+
+        return ItineraryResponse(**data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/options", response_model=TravelOptionsResponse)
+async def travel_options(payload: TravelOptionsRequest) -> Any:
+    try:
+        user_prompt = (
+            f"Origin: {payload.origin_city}\n"
+            f"Destination: {payload.destination_city}\n"
+            "List practical travel options by mode as per schema."
+        )
+
+        svc = PerplexityService()
+        result = await svc.chat_completion(
+            system_prompt=SYSTEM_PROMPT_TRAVEL_OPTIONS,
+            user_prompt=user_prompt,
+            model=MODELS["perplexity"]["text"],
+            temperature=PERPLEXITY_SETTINGS["temperature"],
+            top_p=PERPLEXITY_SETTINGS["top_p"],
+            max_tokens=PERPLEXITY_SETTINGS["max_tokens"],
+            web_search_options=PERPLEXITY_SETTINGS["web_search_options"],
+            recency_filter=payload.recency_filter,
+        )
+
+        # Debug: Log the response structure
+        print(f"DEBUG: Full response: {result}")
+
+        # Extract assistant message content; expect JSON accordance to schema
+        choices = result.get("choices", [])
+        text = ""
+        if choices:
+            msg = choices[0].get("message", {})
+            text = msg.get("content", "")
+            print(f"DEBUG: Extracted text: {text[:200]}...")  # First 200 chars
+
+        # Expect JSON payload; attempt to parse
+        import json
+        data = None
+        if text:
+            try:
+                data = json.loads(text)
+                print("DEBUG: Successfully parsed JSON")
+            except json.JSONDecodeError as e:
+                print(f"DEBUG: JSON parsing failed: {e}")
+                print(f"DEBUG: Failed text: {text}")
+                # Try to clean up the text if it has formatting issues
+                start_idx = text.find('{')
+                end_idx = text.rfind('}') + 1
+                if start_idx != -1 and end_idx > start_idx:
+                    try:
+                        cleaned_text = text[start_idx:end_idx]
+                        data = json.loads(cleaned_text)
+                        print("DEBUG: Successfully parsed cleaned JSON")
+                    except Exception as clean_error:
+                        print(f"DEBUG: Cleaned JSON parsing also failed: {clean_error}")
+                        data = None
+                else:
+                    data = None
+
+        if data is None:
+            print("DEBUG: Using fallback structure")
+            # Fallback minimal structure
+            data = {
+                "origin": payload.origin_city,
+                "destination": payload.destination_city,
+                "travel_options": {
+                    "train": [],
+                    "bus": [],
+                    "car_taxi": [],
+                    "car_transport": [],
+                    "part_load_transport": [],
+                    "flight": []
+                }
+            }
+
+        # Ensure required top-level fields based on the expected schema
+        data.setdefault("origin", payload.origin_city)
+        data.setdefault("destination", payload.destination_city)
+        data.setdefault("travel_options", {
+            "train": [],
+            "bus": [],
+            "car_taxi": [],
+            "car_transport": [],
+            "part_load_transport": [],
+            "flight": []
+        })
+
+        # Convert from travel_options format to modes format for schema compatibility
+        if "travel_options" in data:
+            # Convert from travel_options dict to modes list format
+            modes_list = []
+            travel_options = data.get("travel_options", {})
+
+            for mode_name, options in travel_options.items():
+                if options:  # Only add modes that have options
+                    modes_list.append({
+                        "mode": mode_name,
+                        "options": options
+                    })
+
+            # Update data with the converted format
+            data["modes"] = modes_list
+            del data["travel_options"]
+
+        # Ensure we have the expected field names
+        data["origin_city"] = data.pop("origin", payload.origin_city)
+        data["destination_city"] = data.pop("destination", payload.destination_city)
+
+        return TravelOptionsResponse(**data)
+    except Exception as e:
+        print(f"DEBUG: Exception occurred: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/itinerary/places")
+async def itinerary_places(req: ItineraryPlacesRequest) -> Any:
+    try:
+        system_prompt = SYSTEM_PROMPT_ITINERARY_PLACES
+        user_prompt = (
+            f"Destination: {req.destination_city}\n"
+            f"Interests: {', '.join(req.interests) if req.interests else 'general'}\n"
+            f"Max places: {req.max_places}\n"
+            "Return concise place cards as per schema."
+        )
+
+        contents = [
+            genai_types.Content(
+                role="user",
+                parts=[genai_types.Part.from_text(text=user_prompt)],
+            )
+        ]
+
+        response_schema = genai_types.Schema(
+            type=genai_types.Type.OBJECT,
+            required=["destination_city", "places"],
+            properties={
+                "destination_city": genai_types.Schema(type=genai_types.Type.STRING),
+                "places": genai_types.Schema(
+                    type=genai_types.Type.ARRAY,
+                    items=genai_types.Schema(
+                        type=genai_types.Type.OBJECT,
+                        required=["city", "place_name", "speciality", "tips", "photo_prompts"],
+                        properties={
+                            "city": genai_types.Schema(type=genai_types.Type.STRING),
+                            "place_name": genai_types.Schema(type=genai_types.Type.STRING),
+                            "speciality": genai_types.Schema(type=genai_types.Type.STRING),
+                            "tips": genai_types.Schema(
+                                type=genai_types.Type.ARRAY,
+                                items=genai_types.Schema(type=genai_types.Type.STRING),
+                            ),
+                            "photo_prompts": genai_types.Schema(
+                                type=genai_types.Type.ARRAY,
+                                items=genai_types.Schema(type=genai_types.Type.STRING),
+                            ),
+                        },
+                    ),
+                ),
+            },
+        )
+
+        default_response = {"destination_city": req.destination_city, "places": []}
+
+        data = await async_gemini_generate_content(
+            model=MODELS["gemini"]["text"],
+            contents=contents,
+            system_prompt=system_prompt,
+            response_schema=response_schema,
+            temperature=GEMINI_SETTINGS["temperature"]["text"],
+            top_p=GEMINI_SETTINGS["top_p"]["text"],
+            max_output_tokens=GEMINI_SETTINGS["max_output_tokens"]["text"],
+            timeout=GEMINI_SETTINGS["timeout"]["text"],
+            default_response=default_response,
+        )
+
+        # Generate images for each place
+        image_base_url = "/static"
+        dest_slug = req.destination_city.lower().replace(" ", "-")
+        output_dir = os.path.join(static_dir(), f"itineraries/{dest_slug}/places")
+        ensure_dir(output_dir)
+
+        # Collect all image generation tasks for parallel processing
+        image_tasks = []
+
+        for place in data.get("places", []):
+            prompts = place.get("photo_prompts", [])[:IMAGE_GENERATION["max_images_per_entity"]]
+            if prompts:
+                base_file_name = place.get("place_name", "place").lower().replace(" ", "-")
+                task = async_generate_image_files(
+                    prompts=prompts,
+                    output_dir=output_dir,
+                    base_file_name=base_file_name,
+                )
+                image_tasks.append((place, task))
+
+        # Process all image generations in parallel
+        if image_tasks:
+            results = await asyncio.gather(*[task for _, task in image_tasks], return_exceptions=True)
+
+            # Handle results and assign to places
+            for i, (place, _) in enumerate(image_tasks):
+                result = results[i]
+                if isinstance(result, Exception):
+                    print(f"Image generation failed for {place.get('place_name', 'place')}: {result}")
+                    place["image_urls"] = []
+                else:
+                    files = result
+                    # Convert to served URLs
+                    place["image_urls"] = [
+                        f"{image_base_url}/{os.path.relpath(fp, static_dir())}" for fp in files
+                    ]
+        else:
+            # Set empty image_urls for places without prompts
+            for place in data.get("places", []):
+                place["image_urls"] = []
+
+        return ItineraryPlacesResponse(**data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/food")
+async def food_outlets(payload: dict) -> Any:
+    try:
+        from models.schemas import FoodOptionsRequest, FoodOptionsResponse
+
+        req = FoodOptionsRequest(**payload)
+        system_prompt = SYSTEM_PROMPT_FOOD_OPTIONS
+
+        user_prompt = (
+            f"City: {req.city}\n"
+            f"Cuisines: {', '.join(req.cuisine_preferences) if req.cuisine_preferences else 'any'}\n"
+            f"Price level: {req.price_level or 'any'}\n"
+            "Return JSON as per schema only."
+        )
+
+        svc = PerplexityService()
+        result = await svc.chat_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model=MODELS["perplexity"]["text"],
+            temperature=PERPLEXITY_SETTINGS["temperature"],
+            top_p=PERPLEXITY_SETTINGS["top_p"],
+            max_tokens=1200,  # Keep this specific value as it's more restrictive than config
+            web_search_options=PERPLEXITY_SETTINGS["web_search_options"],
+            recency_filter=req.recency_filter,
+        )
+
+        # Extract and parse JSON
+        choices = result.get("choices", [])
+        text = ""
+        if choices:
+            msg = choices[0].get("message", {})
+            text = msg.get("content", "")
+
+        import json
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = {"city": req.city, "outlets": []}
+
+        data.setdefault("city", req.city)
+        data.setdefault("outlets", [])
+        return FoodOptionsResponse(**data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
