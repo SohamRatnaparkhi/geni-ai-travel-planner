@@ -1,6 +1,8 @@
 from fastapi import FastAPI
-from routes import health, travel, user
+from routes import health, travel, user, destination
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+load_dotenv()
 
 app = FastAPI(
     title="Travel Planner API",
@@ -21,6 +23,7 @@ app.add_middleware(
 app.include_router(health.router)
 app.include_router(travel.router)
 app.include_router(user.router)
+app.include_router(destination.router)
 
 if __name__ == "__main__":
     import uvicorn

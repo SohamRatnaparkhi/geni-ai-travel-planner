@@ -1,0 +1,16 @@
+{
+  "destinations": [
+    {
+      "place": "Jaipur",
+      "days": 3,
+      "budget": 15000,
+      "custom_ins": "vegetarian food, historic sites, no clubs, budget-friendly"
+    },
+    {
+      "place": "Goa",
+      "days": 5,
+      "budget": 25000,
+      "custom_ins": "beach activities, seafood, luxury hotels, adventure sports"
+    }
+  ]
+}
