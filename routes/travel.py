@@ -12,8 +12,11 @@ from models.schemas import (
     TravelOptionsResponse,
 )
 from prompts.system_itinerary import SYSTEM_PROMPT_ITINERARY
+from prompts.system_itinerary_places import SYSTEM_PROMPT_ITINERARY_PLACES
+from prompts.system_food_options import SYSTEM_PROMPT_FOOD_OPTIONS
 from prompts.system_travel_options import SYSTEM_PROMPT_TRAVEL_OPTIONS
 from utils.files import static_dir, ensure_dir
+from models.schemas import ItineraryPlacesRequest, ItineraryPlacesResponse
 
 router = APIRouter(
     prefix="/travel",
@@ -54,7 +57,9 @@ async def get_travel_info():
             "plans": "/travel/plans",
             "destinations": "/travel/destinations",
             "itinerary": "/travel/itinerary",
-            "options": "/travel/options"
+            "itinerary_places": "/travel/itinerary/places",
+            "options": "/travel/options",
+            "food": "/travel/food"
         }
     }
 
@@ -200,7 +205,7 @@ async def generate_itinerary(payload: ItineraryRequest) -> Any:
             response_schema=response_schema,
             temperature=0.35,
             top_p=0.9,
-            max_output_tokens=4096,
+            max_output_tokens=40960,
             timeout=120,
             default_response=default_response,
         )
@@ -270,23 +275,22 @@ async def travel_options(payload: TravelOptionsRequest) -> Any:
         if text:
             try:
                 data = json.loads(text)
-                print(f"DEBUG: Successfully parsed JSON")
+                print("DEBUG: Successfully parsed JSON")
             except json.JSONDecodeError as e:
                 print(f"DEBUG: JSON parsing failed: {e}")
                 print(f"DEBUG: Failed text: {text}")
                 # Try to clean up the text if it has formatting issues
-                try:
-                    # Remove any leading/trailing non-JSON content
-                    start_idx = text.find('{')
-                    end_idx = text.rfind('}') + 1
-                    if start_idx != -1 and end_idx > start_idx:
+                start_idx = text.find('{')
+                end_idx = text.rfind('}') + 1
+                if start_idx != -1 and end_idx > start_idx:
+                    try:
                         cleaned_text = text[start_idx:end_idx]
                         data = json.loads(cleaned_text)
-                        print(f"DEBUG: Successfully parsed cleaned JSON")
-                    else:
-                        raise ValueError("No JSON object found in text")
-                except Exception as clean_error:
-                    print(f"DEBUG: Cleaned JSON parsing also failed: {clean_error}")
+                        print("DEBUG: Successfully parsed cleaned JSON")
+                    except Exception as clean_error:
+                        print(f"DEBUG: Cleaned JSON parsing also failed: {clean_error}")
+                        data = None
+                else:
                     data = None
 
         if data is None:
@@ -341,4 +345,136 @@ async def travel_options(payload: TravelOptionsRequest) -> Any:
         return TravelOptionsResponse(**data)
     except Exception as e:
         print(f"DEBUG: Exception occurred: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/itinerary/places")
+async def itinerary_places(req: ItineraryPlacesRequest) -> Any:
+    try:
+        system_prompt = SYSTEM_PROMPT_ITINERARY_PLACES
+        user_prompt = (
+            f"Destination: {req.destination_city}\n"
+            f"Interests: {', '.join(req.interests) if req.interests else 'general'}\n"
+            f"Max places: {req.max_places}\n"
+            "Return concise place cards as per schema."
+        )
+
+        contents = [
+            genai_types.Content(
+                role="user",
+                parts=[genai_types.Part.from_text(text=user_prompt)],
+            )
+        ]
+
+        response_schema = genai_types.Schema(
+            type=genai_types.Type.OBJECT,
+            required=["destination_city", "places"],
+            properties={
+                "destination_city": genai_types.Schema(type=genai_types.Type.STRING),
+                "places": genai_types.Schema(
+                    type=genai_types.Type.ARRAY,
+                    items=genai_types.Schema(
+                        type=genai_types.Type.OBJECT,
+                        required=["city", "place_name", "speciality", "tips", "photo_prompts"],
+                        properties={
+                            "city": genai_types.Schema(type=genai_types.Type.STRING),
+                            "place_name": genai_types.Schema(type=genai_types.Type.STRING),
+                            "speciality": genai_types.Schema(type=genai_types.Type.STRING),
+                            "tips": genai_types.Schema(
+                                type=genai_types.Type.ARRAY,
+                                items=genai_types.Schema(type=genai_types.Type.STRING),
+                            ),
+                            "photo_prompts": genai_types.Schema(
+                                type=genai_types.Type.ARRAY,
+                                items=genai_types.Schema(type=genai_types.Type.STRING),
+                            ),
+                        },
+                    ),
+                ),
+            },
+        )
+
+        default_response = {"destination_city": req.destination_city, "places": []}
+
+        data = await async_gemini_generate_content(
+            model="gemini-2.5-pro",
+            contents=contents,
+            system_prompt=system_prompt,
+            response_schema=response_schema,
+            temperature=0.35,
+            top_p=0.9,
+            max_output_tokens=40960,
+            timeout=90,
+            default_response=default_response,
+        )
+
+        # Generate images for each place
+        image_base_url = "/static"
+        dest_slug = req.destination_city.lower().replace(" ", "-")
+        output_dir = os.path.join(static_dir(), f"itineraries/{dest_slug}/places")
+        ensure_dir(output_dir)
+
+        for place in data.get("places", []):
+            prompts = place.get("photo_prompts", [])[:2]
+            if not prompts:
+                place["image_urls"] = []
+                continue
+            files = await async_generate_image_files(
+                prompts=prompts,
+                output_dir=output_dir,
+                base_file_name=place.get("place_name", "place").lower().replace(" ", "-"),
+            )
+            place["image_urls"] = [
+                f"{image_base_url}/{os.path.relpath(fp, static_dir())}" for fp in files
+            ]
+
+        return ItineraryPlacesResponse(**data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/food")
+async def food_outlets(payload: dict) -> Any:
+    try:
+        from models.schemas import FoodOptionsRequest, FoodOptionsResponse
+
+        req = FoodOptionsRequest(**payload)
+        system_prompt = SYSTEM_PROMPT_FOOD_OPTIONS
+
+        user_prompt = (
+            f"City: {req.city}\n"
+            f"Cuisines: {', '.join(req.cuisine_preferences) if req.cuisine_preferences else 'any'}\n"
+            f"Price level: {req.price_level or 'any'}\n"
+            "Return JSON as per schema only."
+        )
+
+        svc = PerplexityService()
+        result = await svc.chat_completion(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model="sonar",
+            temperature=0.2,
+            top_p=0.9,
+            max_tokens=1200,
+            web_search_options={"search_context_size": "high"},
+            recency_filter=req.recency_filter,
+        )
+
+        # Extract and parse JSON
+        choices = result.get("choices", [])
+        text = ""
+        if choices:
+            msg = choices[0].get("message", {})
+            text = msg.get("content", "")
+
+        import json
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = {"city": req.city, "outlets": []}
+
+        data.setdefault("city", req.city)
+        data.setdefault("outlets", [])
+        return FoodOptionsResponse(**data)
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

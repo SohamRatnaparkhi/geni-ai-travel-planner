@@ -73,7 +73,7 @@ async def async_gemini_generate_content(
                     else:
                         return default_response
                 except json.JSONDecodeError as e:
-                    print(f"JSON decode error generating content: {e}")
+                    print(f"JSON decode error generating content: {e} for response: {response.text}")
                     return default_response
             else:
                 if response.text:

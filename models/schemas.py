@@ -72,3 +72,47 @@ class TravelOptionsResponse(BaseModel):
     modes: List[TravelMode]
 
 
+# Non day-wise itinerary: place cards
+class ItineraryPlacesRequest(BaseModel):
+    destination_city: str
+    interests: List[str] = Field(default_factory=list)
+    max_places: int = Field(default=8, ge=1, le=30)
+
+
+class ItineraryPlaceCard(BaseModel):
+    city: str
+    place_name: str
+    speciality: str
+    tips: List[str] = Field(default_factory=list)
+    photo_prompts: List[str] = Field(default_factory=list)
+    image_urls: List[str] = Field(default_factory=list)
+
+
+class ItineraryPlacesResponse(BaseModel):
+    destination_city: str
+    places: List[ItineraryPlaceCard]
+
+
+# Food outlets via Perplexity
+class FoodOptionsRequest(BaseModel):
+    city: str
+    cuisine_preferences: List[str] = Field(default_factory=list)
+    price_level: Optional[str] = Field(default=None, description="$, $$, $$$")
+    recency_filter: Optional[str] = None
+
+
+class FoodOutlet(BaseModel):
+    name: str
+    cuisine: Optional[str] = None
+    price_level: Optional[str] = None
+    area_or_neighborhood: Optional[str] = None
+    highlights: List[str] = Field(default_factory=list)
+    booking_tips: Optional[str] = None
+    source_url: Optional[str] = None
+
+
+class FoodOptionsResponse(BaseModel):
+    city: str
+    outlets: List[FoodOutlet]
+
+
