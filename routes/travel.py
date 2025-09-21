@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from typing import List, Any
 from pydantic import BaseModel
 import os
+import asyncio
 from google.genai import types as genai_types
 from services.gemini_service import async_gemini_generate_content, async_generate_image_files
 from services.perplexity_service import PerplexityService
@@ -17,6 +18,7 @@ from prompts.system_food_options import SYSTEM_PROMPT_FOOD_OPTIONS
 from prompts.system_travel_options import SYSTEM_PROMPT_TRAVEL_OPTIONS
 from utils.files import static_dir, ensure_dir
 from models.schemas import ItineraryPlacesRequest, ItineraryPlacesResponse
+from config import MODELS, GEMINI_SETTINGS, PERPLEXITY_SETTINGS, IMAGE_GENERATION
 
 router = APIRouter(
     prefix="/travel",
@@ -199,14 +201,14 @@ async def generate_itinerary(payload: ItineraryRequest) -> Any:
         }
 
         data = await async_gemini_generate_content(
-            model="gemini-2.5-pro",
+            model=MODELS["gemini"]["text"],
             contents=contents,
             system_prompt=system_prompt,
             response_schema=response_schema,
-            temperature=0.35,
-            top_p=0.9,
-            max_output_tokens=40960,
-            timeout=120,
+            temperature=GEMINI_SETTINGS["temperature"]["text"],
+            top_p=GEMINI_SETTINGS["top_p"]["text"],
+            max_output_tokens=GEMINI_SETTINGS["max_output_tokens"]["text"],
+            timeout=GEMINI_SETTINGS["timeout"]["text"],
             default_response=default_response,
         )
 
@@ -216,21 +218,42 @@ async def generate_itinerary(payload: ItineraryRequest) -> Any:
         output_dir = os.path.join(static_dir(), f"itineraries/{dest_slug}")
         ensure_dir(output_dir)
 
+        # Collect all image generation tasks for parallel processing
+        image_tasks = []
+
         for day in data.get("days", []):
             for entity in day.get("entities", []):
-                prompts = entity.get("photo_prompts", [])[:2]
-                if not prompts:
+                prompts = entity.get("photo_prompts", [])[:IMAGE_GENERATION["max_images_per_entity"]]
+                if prompts:
+                    base_file_name = entity.get("name", "entity").lower().replace(" ", "-")
+                    task = async_generate_image_files(
+                        prompts=prompts,
+                        output_dir=output_dir,
+                        base_file_name=base_file_name,
+                    )
+                    image_tasks.append((entity, task))
+
+        # Process all image generations in parallel
+        if image_tasks:
+            results = await asyncio.gather(*[task for _, task in image_tasks], return_exceptions=True)
+
+            # Handle results and assign to entities
+            for i, (entity, _) in enumerate(image_tasks):
+                result = results[i]
+                if isinstance(result, Exception):
+                    print(f"Image generation failed for {entity.get('name', 'entity')}: {result}")
                     entity["image_urls"] = []
-                    continue
-                files = await async_generate_image_files(
-                    prompts=prompts,
-                    output_dir=output_dir,
-                    base_file_name=entity.get("name", "entity").lower().replace(" ", "-"),
-                )
-                # Convert to served URLs
-                entity["image_urls"] = [
-                    f"{image_base_url}/{os.path.relpath(fp, static_dir())}" for fp in files
-                ]
+                else:
+                    files = result
+                    # Convert to served URLs
+                    entity["image_urls"] = [
+                        f"{image_base_url}/{os.path.relpath(fp, static_dir())}" for fp in files
+                    ]
+        else:
+            # Set empty image_urls for entities without prompts
+            for day in data.get("days", []):
+                for entity in day.get("entities", []):
+                    entity["image_urls"] = []
 
         return ItineraryResponse(**data)
     except Exception as e:
@@ -250,11 +273,11 @@ async def travel_options(payload: TravelOptionsRequest) -> Any:
         result = await svc.chat_completion(
             system_prompt=SYSTEM_PROMPT_TRAVEL_OPTIONS,
             user_prompt=user_prompt,
-            model="sonar",
-            temperature=0.2,
-            top_p=0.9,
-            max_tokens=1400,
-            web_search_options={"search_context_size": "high"},
+            model=MODELS["perplexity"]["text"],
+            temperature=PERPLEXITY_SETTINGS["temperature"],
+            top_p=PERPLEXITY_SETTINGS["top_p"],
+            max_tokens=PERPLEXITY_SETTINGS["max_tokens"],
+            web_search_options=PERPLEXITY_SETTINGS["web_search_options"],
             recency_filter=payload.recency_filter,
         )
 
@@ -397,14 +420,14 @@ async def itinerary_places(req: ItineraryPlacesRequest) -> Any:
         default_response = {"destination_city": req.destination_city, "places": []}
 
         data = await async_gemini_generate_content(
-            model="gemini-2.5-pro",
+            model=MODELS["gemini"]["text"],
             contents=contents,
             system_prompt=system_prompt,
             response_schema=response_schema,
-            temperature=0.35,
-            top_p=0.9,
-            max_output_tokens=40960,
-            timeout=90,
+            temperature=GEMINI_SETTINGS["temperature"]["text"],
+            top_p=GEMINI_SETTINGS["top_p"]["text"],
+            max_output_tokens=GEMINI_SETTINGS["max_output_tokens"]["text"],
+            timeout=GEMINI_SETTINGS["timeout"]["text"],
             default_response=default_response,
         )
 
@@ -414,19 +437,40 @@ async def itinerary_places(req: ItineraryPlacesRequest) -> Any:
         output_dir = os.path.join(static_dir(), f"itineraries/{dest_slug}/places")
         ensure_dir(output_dir)
 
+        # Collect all image generation tasks for parallel processing
+        image_tasks = []
+
         for place in data.get("places", []):
-            prompts = place.get("photo_prompts", [])[:2]
-            if not prompts:
+            prompts = place.get("photo_prompts", [])[:IMAGE_GENERATION["max_images_per_entity"]]
+            if prompts:
+                base_file_name = place.get("place_name", "place").lower().replace(" ", "-")
+                task = async_generate_image_files(
+                    prompts=prompts,
+                    output_dir=output_dir,
+                    base_file_name=base_file_name,
+                )
+                image_tasks.append((place, task))
+
+        # Process all image generations in parallel
+        if image_tasks:
+            results = await asyncio.gather(*[task for _, task in image_tasks], return_exceptions=True)
+
+            # Handle results and assign to places
+            for i, (place, _) in enumerate(image_tasks):
+                result = results[i]
+                if isinstance(result, Exception):
+                    print(f"Image generation failed for {place.get('place_name', 'place')}: {result}")
+                    place["image_urls"] = []
+                else:
+                    files = result
+                    # Convert to served URLs
+                    place["image_urls"] = [
+                        f"{image_base_url}/{os.path.relpath(fp, static_dir())}" for fp in files
+                    ]
+        else:
+            # Set empty image_urls for places without prompts
+            for place in data.get("places", []):
                 place["image_urls"] = []
-                continue
-            files = await async_generate_image_files(
-                prompts=prompts,
-                output_dir=output_dir,
-                base_file_name=place.get("place_name", "place").lower().replace(" ", "-"),
-            )
-            place["image_urls"] = [
-                f"{image_base_url}/{os.path.relpath(fp, static_dir())}" for fp in files
-            ]
 
         return ItineraryPlacesResponse(**data)
     except Exception as e:
@@ -452,11 +496,11 @@ async def food_outlets(payload: dict) -> Any:
         result = await svc.chat_completion(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            model="sonar",
-            temperature=0.2,
-            top_p=0.9,
-            max_tokens=1200,
-            web_search_options={"search_context_size": "high"},
+            model=MODELS["perplexity"]["text"],
+            temperature=PERPLEXITY_SETTINGS["temperature"],
+            top_p=PERPLEXITY_SETTINGS["top_p"],
+            max_tokens=1200,  # Keep this specific value as it's more restrictive than config
+            web_search_options=PERPLEXITY_SETTINGS["web_search_options"],
             recency_filter=req.recency_filter,
         )
 

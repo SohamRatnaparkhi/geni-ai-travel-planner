@@ -6,6 +6,7 @@ from typing import Any, List, Optional
 
 from google import genai
 from google.genai import types
+from config import MODELS, GEMINI_SETTINGS
 
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -26,17 +27,28 @@ async_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 async def async_gemini_generate_content(
-    model: str = "gemini-2.5-flash",
+    model: str = None,
     contents: Optional[List[types.Content]] = None,
     system_prompt: str = "",
     response_schema: Optional[types.Schema] = None,
-    temperature: float = 0.4,
-    top_p: float = 0.8,
+    temperature: float = None,
+    top_p: float = None,
     top_k: int = 40,
-    max_output_tokens: int = 1000,
-    timeout: int = 15,
+    max_output_tokens: int = None,
+    timeout: int = None,
     default_response: Any = None,
 ) -> Any:
+    # Use config defaults if not provided
+    if model is None:
+        model = MODELS["gemini"]["text"]
+    if temperature is None:
+        temperature = GEMINI_SETTINGS["temperature"]["text"]
+    if top_p is None:
+        top_p = GEMINI_SETTINGS["top_p"]["text"]
+    if max_output_tokens is None:
+        max_output_tokens = GEMINI_SETTINGS["max_output_tokens"]["text"]
+    if timeout is None:
+        timeout = GEMINI_SETTINGS["timeout"]["text"]
     start_time = time.time()
     try:
         generate_content_config = types.GenerateContentConfig(
@@ -96,7 +108,7 @@ async def async_generate_image_files(
 ) -> List[str]:
     os.makedirs(output_dir, exist_ok=True)
 
-    model = "gemini-2.5-flash-image-preview"
+    model = MODELS["gemini"]["image"]
 
     contents_list: List[List[types.Content]] = []
     for prompt in prompts:
