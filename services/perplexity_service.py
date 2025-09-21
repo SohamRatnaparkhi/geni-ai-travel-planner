@@ -24,7 +24,7 @@ class PerplexityService:
         self,
         system_prompt: str,
         user_prompt: str,
-        model: str = "sonar-pro",
+        model: str = "sonar",
         temperature: float = 0.2,
         top_p: float = 0.9,
         max_tokens: int = 1200,
@@ -33,33 +33,38 @@ class PerplexityService:
         search_domain_filter: Optional[List[str]] = None,
         recency_filter: Optional[str] = None,
     ) -> Dict[str, Any]:
-        request_body: Dict[str, Any] = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "search_mode": "web",
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "stream": False,
-            "return_images": False,
-            "return_related_questions": False,
-        }
+        try:
+            request_body: Dict[str, Any] = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "search_mode": "web",
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
+                "stream": False,
+                "return_images": False,
+                "return_related_questions": False,
+            }
 
-        if reasoning_effort:
-            request_body["reasoning_effort"] = reasoning_effort
-        if web_search_options:
-            request_body["web_search_options"] = web_search_options
-        if search_domain_filter:
-            request_body["search_domain_filter"] = search_domain_filter
-        if recency_filter:
-            request_body["search_recency_filter"] = recency_filter
+            if reasoning_effort:
+                request_body["reasoning_effort"] = reasoning_effort
+            if web_search_options:
+                request_body["web_search_options"] = web_search_options
+            if search_domain_filter:
+                request_body["search_domain_filter"] = search_domain_filter
+            if recency_filter:
+                request_body["search_recency_filter"] = recency_filter
 
-        url = f"{PERPLEXITY_BASE_URL}/chat/completions"
-        response = await AsyncRequests.post(url, headers=self._headers(), json=request_body)
-        response.raise_for_status()
-        return response.json()
+            url = f"{PERPLEXITY_BASE_URL}/chat/completions"
+            response = await AsyncRequests.post(url, headers=self._headers(), json=request_body)
+            print(f"Response: {response.json()}")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"Error generating content: {e}")
+            return {}
 
 

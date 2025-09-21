@@ -234,46 +234,111 @@ async def generate_itinerary(payload: ItineraryRequest) -> Any:
 
 @router.post("/options", response_model=TravelOptionsResponse)
 async def travel_options(payload: TravelOptionsRequest) -> Any:
-    user_prompt = (
-        f"Origin: {payload.origin_city}\n"
-        f"Destination: {payload.destination_city}\n"
-        "List practical travel options by mode as per schema."
-    )
-
-    svc = PerplexityService()
-    result = await svc.chat_completion(
-        system_prompt=SYSTEM_PROMPT_TRAVEL_OPTIONS,
-        user_prompt=user_prompt,
-        model="sonar",
-        temperature=0.2,
-        top_p=0.9,
-        max_tokens=1400,
-        web_search_options={"search_context_size": "high"},
-        recency_filter=payload.recency_filter,
-    )
-
-    # Extract assistant message content; expect JSON accordance to schema
-    choices = result.get("choices", [])
-    text = ""
-    if choices:
-        msg = choices[0].get("message", {})
-        text = msg.get("content", "")
-
-    # Expect JSON payload; attempt to parse
-    import json
     try:
-        data = json.loads(text)
-    except Exception:
-        # Fallback minimal structure
-        data = {
-            "origin_city": payload.origin_city,
-            "destination_city": payload.destination_city,
-            "modes": [],
-        }
+        user_prompt = (
+            f"Origin: {payload.origin_city}\n"
+            f"Destination: {payload.destination_city}\n"
+            "List practical travel options by mode as per schema."
+        )
 
-    # Ensure required top-level fields
-    data.setdefault("origin_city", payload.origin_city)
-    data.setdefault("destination_city", payload.destination_city)
-    data.setdefault("modes", [])
+        svc = PerplexityService()
+        result = await svc.chat_completion(
+            system_prompt=SYSTEM_PROMPT_TRAVEL_OPTIONS,
+            user_prompt=user_prompt,
+            model="sonar",
+            temperature=0.2,
+            top_p=0.9,
+            max_tokens=1400,
+            web_search_options={"search_context_size": "high"},
+            recency_filter=payload.recency_filter,
+        )
 
-    return TravelOptionsResponse(**data)
+        # Debug: Log the response structure
+        print(f"DEBUG: Full response: {result}")
+
+        # Extract assistant message content; expect JSON accordance to schema
+        choices = result.get("choices", [])
+        text = ""
+        if choices:
+            msg = choices[0].get("message", {})
+            text = msg.get("content", "")
+            print(f"DEBUG: Extracted text: {text[:200]}...")  # First 200 chars
+
+        # Expect JSON payload; attempt to parse
+        import json
+        data = None
+        if text:
+            try:
+                data = json.loads(text)
+                print(f"DEBUG: Successfully parsed JSON")
+            except json.JSONDecodeError as e:
+                print(f"DEBUG: JSON parsing failed: {e}")
+                print(f"DEBUG: Failed text: {text}")
+                # Try to clean up the text if it has formatting issues
+                try:
+                    # Remove any leading/trailing non-JSON content
+                    start_idx = text.find('{')
+                    end_idx = text.rfind('}') + 1
+                    if start_idx != -1 and end_idx > start_idx:
+                        cleaned_text = text[start_idx:end_idx]
+                        data = json.loads(cleaned_text)
+                        print(f"DEBUG: Successfully parsed cleaned JSON")
+                    else:
+                        raise ValueError("No JSON object found in text")
+                except Exception as clean_error:
+                    print(f"DEBUG: Cleaned JSON parsing also failed: {clean_error}")
+                    data = None
+
+        if data is None:
+            print("DEBUG: Using fallback structure")
+            # Fallback minimal structure
+            data = {
+                "origin": payload.origin_city,
+                "destination": payload.destination_city,
+                "travel_options": {
+                    "train": [],
+                    "bus": [],
+                    "car_taxi": [],
+                    "car_transport": [],
+                    "part_load_transport": [],
+                    "flight": []
+                }
+            }
+
+        # Ensure required top-level fields based on the expected schema
+        data.setdefault("origin", payload.origin_city)
+        data.setdefault("destination", payload.destination_city)
+        data.setdefault("travel_options", {
+            "train": [],
+            "bus": [],
+            "car_taxi": [],
+            "car_transport": [],
+            "part_load_transport": [],
+            "flight": []
+        })
+
+        # Convert from travel_options format to modes format for schema compatibility
+        if "travel_options" in data:
+            # Convert from travel_options dict to modes list format
+            modes_list = []
+            travel_options = data.get("travel_options", {})
+
+            for mode_name, options in travel_options.items():
+                if options:  # Only add modes that have options
+                    modes_list.append({
+                        "mode": mode_name,
+                        "options": options
+                    })
+
+            # Update data with the converted format
+            data["modes"] = modes_list
+            del data["travel_options"]
+
+        # Ensure we have the expected field names
+        data["origin_city"] = data.pop("origin", payload.origin_city)
+        data["destination_city"] = data.pop("destination", payload.destination_city)
+
+        return TravelOptionsResponse(**data)
+    except Exception as e:
+        print(f"DEBUG: Exception occurred: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
