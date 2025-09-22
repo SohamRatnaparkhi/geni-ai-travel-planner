@@ -252,3 +252,6 @@ The API includes comprehensive error handling for:
 - **Google Gemini AI**: Advanced AI for content generation
 - **AsyncIO**: Parallel processing capabilities
 - **Pydantic**: Data validation and serialization
+
+
+Frontend repo -  https://github.com/Soham1803/travel-planner-app
